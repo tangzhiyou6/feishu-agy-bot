@@ -22,7 +22,7 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
-
+# 从环境变量读取配置
 APP_ID = os.getenv("FEISHU_APP_ID", "")
 APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 ALLOWED_OPEN_ID = os.getenv("FEISHU_ALLOWED_OPEN_ID", "")
@@ -214,7 +214,7 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             reply_text(msg.message_id, f"图片已保存到 {SAVE_PATH}")
         else:
             reply_text(msg.message_id, f"图片下载失败: {resp.msg}")
-    
+
     elif msg.message_type == "file":
         content = json.loads(msg.content)
         file_key = content.get("file_key")
