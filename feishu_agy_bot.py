@@ -311,6 +311,6 @@ event_handler = (
 if __name__ == "__main__":
     print("正在启动飞书 Antigravity 流式助手 (uv)...", flush=True)
     ws_client = lark.ws.Client(
-        APP_ID, APP_SECRET, event_handler=event_handler, log_level=lark.LogLevel.INFO
+        APP_ID, APP_SECRET, event_handler=event_handler, log_level=lark.LogLevel.DEBUG
     )
     ws_client.start()
