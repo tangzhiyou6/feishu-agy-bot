@@ -14,6 +14,8 @@ import threading
 import time
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
+    CreateFileRequest,
+    CreateFileRequestBody,
     GetMessageResourceRequest,
     PatchMessageRequest,
     PatchMessageRequestBody,
@@ -26,6 +28,9 @@ APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 ALLOWED_OPEN_ID = os.getenv("FEISHU_ALLOWED_OPEN_ID", "")
 WORK_DIR = os.getenv("AGY_WORK_DIR", os.path.expanduser("~"))
 SAVE_PATH = os.getenv("IMG_SAVE_PATH", "/tmp/latest.png")
+FILE_SAVE_DIR = "/tmp/feishu_files"
+os.makedirs(FILE_SAVE_DIR, exist_ok=True)
+
 
 if not APP_ID or not APP_SECRET:
     print("[错误] 缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET 环境变量", file=sys.stderr, flush=True)
@@ -209,6 +214,29 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             reply_text(msg.message_id, f"图片已保存到 {SAVE_PATH}")
         else:
             reply_text(msg.message_id, f"图片下载失败: {resp.msg}")
+    
+    elif msg.message_type == "file":
+        content = json.loads(msg.content)
+        file_key = content.get("file_key")
+        file_name = content.get("file_name") or f"file_{int(time.time())}"
+        if not file_key:
+            return
+
+        req = (
+            GetMessageResourceRequest.builder()
+            .message_id(msg.message_id)
+            .file_key(file_key)
+            .type("file")
+            .build()
+        )
+        resp = api_client.im.v1.message_resource.get(req)
+        if resp.success():
+            save_path = os.path.join(FILE_SAVE_DIR, file_name)
+            with open(save_path, "wb") as f:
+                f.write(resp.file.read())
+            reply_text(msg.message_id, f"文件已保存到：{save_path}\n你可以直接发消息让 agy 转换它。")
+        else:
+            reply_text(msg.message_id, f"文件下载失败：{resp.msg}")
 
     elif msg.message_type == "text":
         text = json.loads(msg.content).get("text", "").strip()
@@ -218,10 +246,60 @@ def handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             current_conversation_id = None
             reply_text(msg.message_id, "已开启新对话，之前的上下文已清空。")
             return
+        if text.startswith("/send "):
+            target_path = text[6:].strip()
+            reply_file(msg.message_id, target_path)
+            return
 
         threading.Thread(
             target=run_agy_stream_and_reply, args=(msg.message_id, text), daemon=True
         ).start()
+
+
+def reply_file(message_id: str, file_path: str) -> None:
+    """将服务器上的文件上传到飞书并回复给用户"""
+    if not os.path.isfile(file_path):
+        reply_text(message_id, f"找不到文件：{file_path}")
+        return
+
+    file_name = os.path.basename(file_path)
+    try:
+        with open(file_path, "rb") as f:
+            upload_req = (
+                CreateFileRequest.builder()
+                .request_body(
+                    CreateFileRequestBody.builder()
+                    .file_type("stream")  # stream 适用于任意格式文件
+                    .file_name(file_name)
+                    .file(f)
+                    .build()
+                )
+                .build()
+            )
+            upload_resp = api_client.im.v1.file.create(upload_req)
+
+        if not upload_resp.success() or not upload_resp.data:
+            reply_text(message_id, f"文件上传飞书失败：{upload_resp.msg}")
+            return
+
+        file_key = upload_resp.data.file_key
+        send_req = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .content(json.dumps({"file_key": file_key}))
+                .msg_type("file")
+                .build()
+            )
+            .build()
+        )
+        send_resp = api_client.im.v1.message.reply(send_req)
+        if not send_resp.success():
+            reply_text(message_id, f"发送文件失败：{send_resp.msg}")
+    except Exception as e:
+        reply_text(message_id, f"回传文件异常：{e}")
+
 
 
 event_handler = (
