@@ -1,0 +1,146 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "lark-oapi>=1.4.0",
+# ]
+# ///
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import lark_oapi as lark
+from lark_oapi.api.im.v1 import (
+    GetMessageResourceRequest,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
+)
+
+# 从环境变量读取配置
+APP_ID = os.getenv("FEISHU_APP_ID", "")
+APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
+ALLOWED_OPEN_ID = os.getenv("FEISHU_ALLOWED_OPEN_ID", "")
+WORK_DIR = os.getenv("AGY_WORK_DIR", os.path.expanduser("~"))
+SAVE_PATH = os.getenv("IMG_SAVE_PATH", "/tmp/latest.png")
+
+if not APP_ID or not APP_SECRET:
+    print("[错误] 缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET 环境变量", file=sys.stderr)
+    sys.exit(1)
+
+api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
+current_conversation_id = None
+agy_lock = threading.Lock()
+
+
+def reply_text(message_id: str, text: str) -> None:
+    req = (
+        ReplyMessageRequest.builder()
+        .message_id(message_id)
+        .request_body(
+            ReplyMessageRequestBody.builder()
+            .content(json.dumps({"text": text}))
+            .msg_type("text")
+            .build()
+        )
+        .build()
+    )
+    api_client.im.v1.message.reply(req)
+
+
+def run_agy_and_reply(message_id: str, prompt: str) -> None:
+    global current_conversation_id
+
+    with agy_lock:
+        cmd = ["agy", "-p", prompt, "--output-format", "json"]
+        if current_conversation_id:
+            cmd.extend(["--conversation", current_conversation_id])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=WORK_DIR,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            raw_out = result.stdout.strip()
+            try:
+                data = json.loads(raw_out)
+                if data.get("conversation_id"):
+                    current_conversation_id = data["conversation_id"]
+                output = (
+                    data.get("response")
+                    or data.get("text")
+                    or data.get("result")
+                    or raw_out
+                )
+            except json.JSONDecodeError:
+                output = raw_out or result.stderr.strip() or "（无输出）"
+        except subprocess.TimeoutExpired:
+            output = "执行超时（超过 120 秒）。"
+        except Exception as e:
+            output = f"调用 agy 失败: {e}"
+
+    reply_text(message_id, output[:4000])
+
+
+def handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
+    global current_conversation_id
+    sender_id = data.event.sender.sender_id.open_id
+    msg = data.event.message
+
+    if not ALLOWED_OPEN_ID:
+        print(f"[提示] 收到来自 open_id={sender_id} 的消息，请填入 .env 的 FEISHU_ALLOWED_OPEN_ID")
+        reply_text(msg.message_id, f"未配置白名单，你的 open_id 是：{sender_id}")
+        return
+    if sender_id != ALLOWED_OPEN_ID:
+        return
+
+    if msg.message_type == "image":
+        image_key = json.loads(msg.content).get("image_key")
+        if not image_key:
+            return
+        req = (
+            GetMessageResourceRequest.builder()
+            .message_id(msg.message_id)
+            .file_key(image_key)
+            .type("image")
+            .build()
+        )
+        resp = api_client.im.v1.message_resource.get(req)
+        if resp.success():
+            with open(SAVE_PATH, "wb") as f:
+                f.write(resp.file.read())
+            reply_text(msg.message_id, f"图片已保存到 {SAVE_PATH}")
+        else:
+            reply_text(msg.message_id, f"图片下载失败: {resp.msg}")
+
+    elif msg.message_type == "text":
+        text = json.loads(msg.content).get("text", "").strip()
+        if not text:
+            return
+        if text.lower() in ("/new", "/reset"):
+            current_conversation_id = None
+            reply_text(msg.message_id, "已开启新对话，之前的上下文已清空。")
+            return
+
+        reply_text(msg.message_id, "收到，正在思考...")
+        threading.Thread(
+            target=run_agy_and_reply, args=(msg.message_id, text), daemon=True
+        ).start()
+
+
+event_handler = (
+    lark.EventDispatcherHandler.builder("", "")
+    .register_p2_im_message_receive_v1(handle_message)
+    .build()
+)
+
+if __name__ == "__main__":
+    print("正在启动飞书 Antigravity 助手 (uv)...", flush=True)
+    ws_client = lark.ws.Client(
+        APP_ID, APP_SECRET, event_handler=event_handler, log_level=lark.LogLevel.INFO
+    )
+    ws_client.start()
