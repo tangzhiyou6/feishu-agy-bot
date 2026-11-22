@@ -39,3 +39,20 @@ nohup python3 feishu_img_saver.py > /tmp/feishu_bot.log 2>&1 &
 >3.取回文件： 看到 agy 提示转换完成后，发送：
 /send /tmp/feishu_files/report.pdf
 机器人就会把转换好的 PDF 直接发到飞书聊天窗口里。
+
+
+
+
+## 钉钉的运行
+
+加上 --env-file .env 参数运行即可：
+```Bash
+uv run --env-file .env dingtalk_agy_bot.py
+```
+
+或者先在当前终端导入 .env 再运行：
+```Bash
+set -a && source .env && set +a && uv run dingtalk_agy_bot.py
+```
+>4.运行钉钉程序
+uv run --env-file .env dingtalk_agy_bot.py
